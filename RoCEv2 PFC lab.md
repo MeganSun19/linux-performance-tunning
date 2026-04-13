@@ -56,6 +56,18 @@ tc -s class show dev ens192
 ```
 
 **期待结果**：
+```bash
+root@ubuntu1:/home/# tc -s class show dev ens192
+class prio 1:1 parent 1:
+Sent 2970768684 bytes 2745764 pkt (dropped 0, overlimits 0 requeues 0)
+backlog 0b 0p requeues 0
+class prio 1:2 parent 1:
+Sent 151463708507 bytes 109021284 pkt (dropped 0, overlimits 0 requeues 0)
+backlog 0b 0p requeues 0
+class prio 1:3 parent 1:
+Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0)
+backlog 0b 0p requeues 0
+```
 *   **1:1 (Band 0)**：`Sent` 字节数持续增加，代表 RoCE 业务流已成功进入专属快车道。
 *   **1:2 (Band 1)**：字节数巨大，代表 iperf3 垃圾流量及之前未标记的 RoCE 包在此排队。
 

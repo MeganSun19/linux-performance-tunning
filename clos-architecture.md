@@ -1,6 +1,7 @@
 # Clos 架构
 leaf-spine 是clos的工业落地，但clos并不一定都指leaf-spine.
 5-Stage Clos（也就是带 Super-Spine 的架构，Facebook/Meta 就在用）通常被称为 "Clos Network" 或 "Data Center Fabric"，虽然它也是由 Leaf 和 Spine 组成的，但当层级超过 3 级（物理 2 层）时，人们往往倾向于回归叫它 "Clos" 或 "Multi-tier Clos"，而狭义的 "Leaf-Spine" 通常指两层物理结构的 3-Stage 架构。
+
 ## 1. 核心特点
 
 - **扁平化与高带宽**：相比传统三层架构，Clos 更平坦（Spine-Leaf 全互联），适合分布式存储等以东西向流量为主的场景。
@@ -55,14 +56,23 @@ leaf-spine 是clos的工业落地，但clos并不一定都指leaf-spine.
   即：每个router/switch都可以根据自己的bgp policy独立选择next-hop.
   传统的IGP选路只会通过metric,全网统一。BGP可以通过LF,MED,AS_PATH等自己决定去往同一个prefx走哪条路。
   数据中心中的anycast 服务架构：
-  假设DNS service遍布在A,B,C三个机架，分属leaf1,leaf2,leaf3.所有服务器都annouce 10.10.10.10/32
-           Spine
-       /   |   \
-    Leaf1 Leaf2 Leaf3
-      |      |      |
-   DNS-A   DNS-B  DNS-C
+  假设 DNS service 遍布在 A、B、C 三个机架，分属 leaf1、leaf2、leaf3，所有服务器都 announce `10.10.10.10/32`：
 
-   BGP anycast的作法：可以通过LP, Leaf1走dns-a...
+```mermaid
+flowchart TB
+  spine[Spine]
+  l1[Leaf1]
+  l2[Leaf2]
+  l3[Leaf3]
+  spine --> l1
+  spine --> l2
+  spine --> l3
+  l1 --> dnsA[DNS-A]
+  l2 --> dnsB[DNS-B]
+  l3 --> dnsC[DNS-C]
+```
+
+  BGP anycast 的作法：可以通过 LP，Leaf1 走 dns-a…
    e,g: anycase LB, 通过BGP local-pref, med, community可以实现30% traffic --- SiteA, 50% traffic--- SiteB, 20% traffic --- SiteC，这就是uequal-cost load balancing
 
 
@@ -80,35 +90,43 @@ leaf-spine 是clos的工业落地，但clos并不一定都指leaf-spine.
 
 路径示意：`Leaf > Spine > Leaf`
 
-```text
-   +-------+
-   |       |----------------------------+
-   |       |------------------+         |
-   |       |--------+         |         |
-   +-------+        |         |         |
-   +-------+        |         |         |
-   |       |--------+---------+-------+ |
-   |       |--------+-------+ |       | |
-   |       |------+ |       | |       | |
-   +-------+      | |       | |       | |
-   +-------+      | |       | |       | |
-   |       |------+-+-------+-+-----+ | |
-   |       |------+-+-----+ | |     | | |
-   |       |----+ | |     | | |     | | |
-   +-------+    | | |     | | |   ---------> M links
-    Tier 1      | | |     | | |     | | |
-              +-------+ +-------+ +-------+
-              |       | |       | |       |
-              |       | |       | |       | Tier 2
-              |       | |       | |       |
-              +-------+ +-------+ +-------+
-                | | |     | | |     | | |
-                | | |     | | |   ---------> N Links
-                | | |     | | |     | | |
-                O O O     O O O     O O O   Servers
+对应 RFC 7938 **Figure 2: 3-Stage Folded Clos** 的抽象结构（Tier 1 = Spine，Tier 2 = Leaf；Leaf 经 **M** 条上行与多台 Spine 全互联，下行 **N** 路接服务器）：
 
-                  Figure 2: 3-Stage Folded Clos Topology
+```mermaid
+flowchart TB
+  subgraph t1["Tier 1（Spine）"]
+    direction LR
+    S1[Spine]
+    S2[Spine]
+    S3[Spine]
+  end
+  subgraph t2["Tier 2（Leaf）"]
+    direction LR
+    L1[Leaf]
+    L2[Leaf]
+    L3[Leaf]
+  end
+  subgraph hosts["Servers（每台 Leaf 下行 N links）"]
+    direction LR
+    O1((○))
+    O2((○))
+    O3((○))
+  end
+  S1 --- L1
+  S1 --- L2
+  S1 --- L3
+  S2 --- L1
+  S2 --- L2
+  S2 --- L3
+  S3 --- L1
+  S3 --- L2
+  S3 --- L3
+  L1 --> O1
+  L2 --> O2
+  L3 --> O3
 ```
+
+> Leaf 与每台 Spine 之间为 **M** 条上行（示意为上图中 Leaf–Spine 全互联 / ECMP）；具体 **M、N** 以端口规划为准。
 
 ### 3.3 Oversubscription（超配）
 
@@ -142,6 +160,26 @@ leaf-spine 是clos的工业落地，但clos并不一定都指leaf-spine.
 ### 3.4 5-Stage Clos 拓扑
 
 路径示意：`Leaf > Spine > Super Spine > Spine > Leaf`
+
+典型 **5-Stage** 是在 3-Stage 之上增加 **Super-Spine** 层，用于在多个 Pod/区块之间扩展骨干带宽（同一 Pod 内仍是 Leaf–Spine，跨 Pod 经 Super-Spine 汇聚）：
+
+```mermaid
+flowchart TB
+  subgraph podA["Pod A"]
+    LA[Leaf] --> SA[Spine]
+  end
+  subgraph podB["Pod B"]
+    LB[Leaf] --> SB[Spine]
+  end
+  subgraph core["Super-Spine 层"]
+    SS1[Super-Spine]
+    SS2[Super-Spine]
+  end
+  SA --> SS1
+  SA --> SS2
+  SB --> SS1
+  SB --> SS2
+```
 
 ---
 
@@ -251,6 +289,7 @@ ip as-path access-list 10 deny .*
 - 需要足够大的多路径扇出能力（例如 64 口设备场景常要求 32 路 ECMP）。
 
 #### 扇出（Fan-out）直观解释
+fan-out = “每个交换机向上全连接扩散”
 
 以 64 口交换机为例：
 

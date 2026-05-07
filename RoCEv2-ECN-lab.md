@@ -102,7 +102,7 @@ sudo tcpdump -i ens192 src host 10.124.148.187 and udp port 4791 -c 20 -vvv
 *   输出中包含 `IP (tos 0x3, ce ...)`。
 *   **0x3** 代表原来的 `0x2` (ECT(0)) 被交换机改写成了 `0x3` (CE)。
 *   `ce` 明确代表 **Congestion Encountered**。
-
+![alt text](image.png)
 ---
 
 ## 5. 常见问题 (Troubleshooting)

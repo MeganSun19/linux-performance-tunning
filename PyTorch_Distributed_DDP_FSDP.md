@@ -32,31 +32,37 @@
 ### 2.1 AllReduce —— "同步全局梯度"
 
 所有 GPU 交出自己的数据，混合求和，**所有人拿回相同的结果**。
+
 ```
 GPU 0: [1,2,3]  ─┐
 GPU 1: [4,5,6]  ─┼─→ sum → 所有 GPU 都得到 [5,7,9]
 GPU 2: [0,0,0]  ─┘
 ```
+
 **用于**：DDP 反向传播后同步梯度
 
 ### 2.2 AllGather —— "凑齐完整权重"
 
 每个 GPU 拿出自己的一块，**所有人拿回拼好的完整数据**。
+
 ```
 GPU 0: [A]  ─┐
 GPU 1: [B]  ─┼─→ 所有 GPU 都得到 [A, B, C]
 GPU 2: [C]  ─┘
 ```
+
 **用于**：FSDP 前向/反向前把分片权重临时拼成完整权重
 
 ### 2.3 ReduceScatter —— "算完梯度，各回各家"
 
 先全局求和，然后把结果切块，**每个 GPU 只拿回属于自己的那一份**。
+
 ```
 GPU 0: [A0,A1,A2]  ─┐               GPU 0: [ΣX0]
 GPU 1: [B0,B1,B2]  ─┼─→ sum ─→ 切  GPU 1: [ΣX1]
 GPU 2: [C0,C1,C2]  ─┘               GPU 2: [ΣX2]
 ```
+
 **用于**：FSDP 反向传播后，把梯度分散回各个持有者
 
 ### 2.4 关键等式
@@ -87,6 +93,7 @@ FSDP 只做第一步（ReduceScatter），**省掉了 AllGather 这一步的网�
 ### 3.2 显存构成（"老三样"）
 
 DDP 的每张卡必须存下：
+
 - **权重 (Parameters)**：1× 模型大小
 - **梯度 (Gradients)**：1× 模型大小
 - **优化器状态 (Optimizer States, Adam)**：2× 模型大小（动量 + 方差）
@@ -117,10 +124,12 @@ DDP 的精华不只是"AllReduce"，而是它的**通信与计算重叠机制**�
 
 **优化器**：负责"根据梯度来更新参数"的模块。不同优化器维护不同状态：
 
-| 优化器 | 维护状态 | 显存倍率 |
-|--------|---------|---------|
-| SGD | 无（或仅动量） | 0~1× |
-| Adam | 动量 + 方差 | 2× |
+
+| 优化器  | 维护状态    | 显存倍率 |
+| ---- | ------- | ---- |
+| SGD  | 无（或仅动量） | 0~1× |
+| Adam | 动量 + 方差 | 2×   |
+
 
 **为什么 DDP 里优化器各自独立，但结果一致？**
 因为所有 GPU 的梯度经过 AllReduce 后完全相同，用相同梯度更新相同参数，得到的结果也一定相同。
@@ -133,11 +142,13 @@ DDP 的精华不只是"AllReduce"，而是它的**通信与计算重叠机制**�
 
 FSDP 对应的理论是 ZeRO-3。它把 DDP 里每张卡都要完整保存的三件东西，全部按 GPU 数量 N 等分：
 
-| 数据 | DDP（每卡） | FSDP（每卡） |
-|------|-----------|------------|
-| 权重 | 完整 1× | 1/N × |
-| 梯度 | 完整 1× | 1/N × |
-| 优化器状态 | 完整 2× | 1/N × 2 |
+
+| 数据    | DDP（每卡） | FSDP（每卡） |
+| ----- | ------- | -------- |
+| 权重    | 完整 1×   | 1/N ×    |
+| 梯度    | 完整 1×   | 1/N ×    |
+| 优化器状态 | 完整 2×   | 1/N × 2  |
+
 
 理想情况下，N 张卡的 FSDP 使单卡显存降至 DDP 的 1/N。
 
@@ -147,20 +158,25 @@ FSDP 对应的理论是 ZeRO-3。它把 DDP 里每张卡都要完整保存的三
 每张卡只存 1/N 的权重碎片，极度省显存。
 
 **② 前向传播前：AllGather 借参数**
+
 ```
 [AllGather 借来所有分片] → [临时拼出完整权重] → [前向计算] → [立刻释放借来的权重]
 ```
+
 显存在此时短暂飙升（因为临时持有完整权重），计算完即释放。
 
 **③ 反向传播：再次 AllGather + ReduceScatter 还梯度**
+
 ```
 [AllGather 借参数] → [反向计算完整梯度] → [ReduceScatter 散发梯度] → [每卡只留 1/N 梯度]
 ```
 
 **④ 优化器更新**
+
 ```
 [用 1/N 梯度] → [更新 1/N 权重] → [产生 1/N 优化器状态]
 ```
+
 全程不需要通信，各卡独立完成。
 
 **⑤ 回到待机状态**
@@ -172,6 +188,7 @@ FSDP 对应的理论是 ZeRO-3。它把 DDP 里每张卡都要完整保存的三
 
 **答**：因为 FSDP 每张卡只更新 1/N 的权重，完整的梯度给它不仅用不上，还会撑爆显存。
 ReduceScatter 做了两件事：
+
 1. 全局求和（全部梯度汇聚）
 2. 立刻切块（每张卡只拿走属于自己负责的那 1/N）
 
@@ -181,14 +198,16 @@ ReduceScatter 做了两件事：
 
 ## 5. DDP vs FSDP 对比总览
 
-| 特性 | DDP | FSDP |
-|------|-----|------|
-| 每卡存储 | 完整模型 | 1/N 模型 |
-| 通信次数/Step | 1 次 | 多次（前向+反向各一次 AllGather，反向后一次 ReduceScatter） |
-| 主要通信操作 | AllReduce | AllGather + ReduceScatter |
-| 单卡显存 | 4× 参数量（老三样） | 约 4×/N 参数量 |
-| 适用场景 | 单卡装得下的模型 | 单卡装不下，但集群总显存够的超大模型 |
-| 通信开销 | 低（只有一次 AllReduce） | 较高（频繁 AllGather） |
+
+| 特性        | DDP               | FSDP                                       |
+| --------- | ----------------- | ------------------------------------------ |
+| 每卡存储      | 完整模型              | 1/N 模型                                     |
+| 通信次数/Step | 1 次               | 多次（前向+反向各一次 AllGather，反向后一次 ReduceScatter） |
+| 主要通信操作    | AllReduce         | AllGather + ReduceScatter                  |
+| 单卡显存      | 4× 参数量（老三样）       | 约 4×/N 参数量                                 |
+| 适用场景      | 单卡装得下的模型          | 单卡装不下，但集群总显存够的超大模型                         |
+| 通信开销      | 低（只有一次 AllReduce） | 较高（频繁 AllGather）                           |
+
 
 ---
 
@@ -234,6 +253,7 @@ dist.destroy_process_group()
 ## 7. 动手实验：DDP vs FSDP 显存对比
 
 ### 7.1 实验环境
+
 - **平台**：Kaggle Notebook
 - **硬件**：GPU T4 ×2（双卡，PCIe 连接，无 NVLink）
 - **模型**：10 层 4096×4096 线性层（参数量约 1.68 亿，方便凸显差距）
@@ -313,12 +333,14 @@ if __name__ == "__main__":
 ### 7.4 实验输出
 
 **DDP 模式：**
+
 ```
 训练模式: DDP
 GPU 0 峰值显存占用: 3860.19 MB
 ```
 
 **FSDP 模式：**
+
 ```
 训练模式: FSDP
 GPU 0 峰值显存占用: 2259.80 MB
@@ -326,13 +348,16 @@ GPU 0 峰值显存占用: 2259.80 MB
 
 ### 7.5 结果分析
 
-| 模式 | 峰值显存 | 说明 |
-|------|---------|------|
-| DDP | 3860 MB | 完整权重 + 完整梯度 + 完整 Adam 状态 + 激活值 |
-| FSDP | 2260 MB | 权重/梯度/优化器各切 1/2，节省约 1.6 GB |
+
+| 模式   | 峰值显存    | 说明                             |
+| ---- | ------- | ------------------------------ |
+| DDP  | 3860 MB | 完整权重 + 完整梯度 + 完整 Adam 状态 + 激活值 |
+| FSDP | 2260 MB | 权重/梯度/优化器各切 1/2，节省约 1.6 GB     |
+
 
 **节省了哪些显存？**
 模型参数量 ≈ 1.68 亿，FP32 下：
+
 - 参数：1.68亿 × 4B ≈ 672 MB
 - 梯度：672 MB
 - Adam 状态：672 × 2 = 1344 MB
@@ -371,9 +396,10 @@ Setting OMP_NUM_THREADS environment variable for each process to be 1 in default
 
 ---
 
-## 9. Key take aways 
+## 9. Key take aways
 
 ### Should know
+
 - DDP 和 FSDP 是并行策略，NCCL 是底层通信库，两者不是同一层
 - DDP 底层走 AllReduce，FSDP 底层走 AllGather + ReduceScatter
 - FSDP 的四个生命周期状态（待机 → AllGather → 计算 → ReduceScatter）
@@ -381,11 +407,13 @@ Setting OMP_NUM_THREADS environment variable for each process to be 1 in default
 - 只有 `rank 0` 负责打印日志和保存模型（行规）
 
 ### better to know
+
 - 梯度桶的具体 Bucket 大小调优（默认 25MB，生产环境会调整）
 - FSDP 的 `ShardingStrategy` 参数（FULL_SHARD、SHARD_GRAD_OP 等）
 - ZeRO-1/2/3 精确显存公式推导
 
 ### 实际工作场景
+
 1. **模型太大单卡装不下**：从 DDP 切换到 FSDP，调整 `ShardingStrategy`
 2. **FSDP 训练慢**：检查跨节点通信，确认 TP 是否跑在 NVLink 上而非跨机
 3. **调试分布式训练**：用 `NCCL_DEBUG=INFO` + `rank 0` 日志定位问题
@@ -395,12 +423,15 @@ Setting OMP_NUM_THREADS environment variable for each process to be 1 in default
 
 ## 10. 总结
 
-| 概念 | 要点 |
-|------|------|
-| DDP | 完整模型复制，AllReduce 同步梯度，通信次数少 |
-| FSDP | 老三样全切 1/N，AllGather 借参数 + ReduceScatter 还梯度 |
-| AllReduce = ReduceScatter + AllGather | FSDP 只做前半步，省掉后半步通信 |
-| 梯度桶重叠 | DDP 的核心优化，通信与计算并行，降低实际等待时间 |
-| torchrun | 多进程启动器，自动注入 LOCAL_RANK 等环境变量 |
-| OMP_NUM_THREADS | 生产环境必须调优，值 = CPU核数 / GPU数 |
-| 适用场景 | DDP 适合中小模型，FSDP 适合单卡塞不下的超大模型 |
+
+| 概念                                    | 要点                                          |
+| ------------------------------------- | ------------------------------------------- |
+| DDP                                   | 完整模型复制，AllReduce 同步梯度，通信次数少                 |
+| FSDP                                  | 老三样全切 1/N，AllGather 借参数 + ReduceScatter 还梯度 |
+| AllReduce = ReduceScatter + AllGather | FSDP 只做前半步，省掉后半步通信                          |
+| 梯度桶重叠                                 | DDP 的核心优化，通信与计算并行，降低实际等待时间                  |
+| torchrun                              | 多进程启动器，自动注入 LOCAL_RANK 等环境变量                |
+| OMP_NUM_THREADS                       | 生产环境必须调优，值 = CPU核数 / GPU数                   |
+| 适用场景                                  | DDP 适合中小模型，FSDP 适合单卡塞不下的超大模型                |
+
+
